@@ -8,7 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +39,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.activity.viewModels
 import androidx.navigation.NavBackStackEntry
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -73,7 +75,9 @@ import com.rifsxd.ksunext.ui.viewmodel.SuperUserViewModel
 data class ScrollState(
     val isScrollingDown: MutableState<Boolean>,
     val scrollOffset: MutableState<Float>,
-    val previousScrollOffset: MutableState<Float>
+    val previousScrollOffset: MutableState<Float>,
+    val isNavBarEnabled: State<Boolean>,
+    val isHapticsEnabled: State<Boolean>
 )
 
 val LocalScrollState = compositionLocalOf<ScrollState?> { null }
@@ -189,13 +193,17 @@ fun Modifier.trackScroll(
     return this.nestedScroll(scrollConnection)
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+
+    private val appLockState = mutableStateOf(false)
 
     var zipUri by mutableStateOf<ArrayList<Uri>?>(null)
     enum class NavigateLocation { SUPERUSER, MODULES, SETTINGS }
     var navigateLoc by mutableStateOf<NavigateLocation?>(null)
     var moduleActionId by mutableStateOf<String?>(null)
     var amoledModeState = mutableStateOf(false)
+    var navBarEnabled = mutableStateOf(true)
+    var hapticsEnabled = mutableStateOf(false)
     private val handler = Handler(Looper.getMainLooper())
 
     val moduleViewModel: ModuleViewModel by viewModels()
@@ -226,6 +234,8 @@ class MainActivity : ComponentActivity() {
         try {
             val prefsInit = getSharedPreferences("settings", MODE_PRIVATE)
             amoledModeState.value = prefsInit.getBoolean("enable_amoled", false)
+            navBarEnabled.value = prefsInit.getBoolean("enable_navbar", true)
+            hapticsEnabled.value = prefsInit.getBoolean("enable_haptics", false)
         } catch (_: Exception) {}
 
         val isManager = Natives.isManager
@@ -239,7 +249,17 @@ class MainActivity : ComponentActivity() {
         if(intent != null)
             handleIntent(intent)
 
-        setContent {
+        val prefsInit = getSharedPreferences("settings", MODE_PRIVATE)
+        val requireBiometric = prefsInit.getBoolean("enable_biometric_lock", false)
+
+        if (savedInstanceState != null) {
+            appLockState.value = savedInstanceState.getBoolean("appLockState", requireBiometric)
+
+        } else {
+            appLockState.value = requireBiometric
+        }
+
+        setContent { Box(modifier = Modifier.fillMaxSize()) {
             KernelSUTheme(amoledMode = amoledModeState.value) {
                 val navController = rememberNavController()
                 val snackBarHostState = remember { SnackbarHostState() }
@@ -334,7 +354,7 @@ class MainActivity : ComponentActivity() {
                 val showBottomBar = when (currentDestination?.route) {
                     FlashScreenDestination.route -> false // Hide for FlashScreenDestination
                     ExecuteModuleActionScreenDestination.route -> false // Hide for ExecuteModuleActionScreen
-                    else -> !isScrollingDown.value
+                    else -> !isScrollingDown.value && navBarEnabled.value
                 }
 
                 Scaffold(
@@ -346,7 +366,9 @@ class MainActivity : ComponentActivity() {
                             LocalScrollState provides ScrollState(
                                 isScrollingDown = isScrollingDown,
                                 scrollOffset = scrollOffset,
-                                previousScrollOffset = previousScrollOffset
+                                previousScrollOffset = previousScrollOffset,
+                                isNavBarEnabled = navBarEnabled,
+                                isHapticsEnabled = hapticsEnabled
                             )
                         ) {
                             val visibleDestinations = remember(fullFeatured) {
@@ -366,13 +388,20 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
+                            val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+
                             val hostModifier = Modifier
                                 .padding(innerPadding)
                                 .fillMaxSize()
                                 .horizontalSwipeNavigator(
                                     currentRoute = currentRoute,
                                     destinations = visibleDestinations,
-                                    onNavigate = { navigateToIndex(it) }
+                                    onNavigate = {
+                                        if (hapticsEnabled.value) {
+                                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                                        }
+                                        navigateToIndex(it)
+                                    }
                                 )
 
                             DestinationsNavHost(
@@ -481,6 +510,56 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            AppLockOverlay(amoledModeState.value)
+
+        } } // Box & setContent
+    } // onCreate
+
+    @Composable
+    private fun AppLockOverlay(amoledMode: Boolean) {
+        if (appLockState.value) {
+            KernelSUTheme(amoledMode = amoledMode) {
+                androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+                    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                    var isPromptShowing by remember { mutableStateOf(false) }
+                    DisposableEffect(lifecycleOwner) {
+                        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+                                val timeout = prefs.getLong("app_lock_timeout", 60000L)
+                                if (!com.rifsxd.ksunext.ui.util.AppLockManager.shouldPrompt(timeout)) {
+                                    appLockState.value = false
+                                    return@LifecycleEventObserver
+                                }
+
+                                if (!isPromptShowing) {
+                                    isPromptShowing = true
+                                    com.rifsxd.ksunext.ui.util.BiometricAuthenticator(this@MainActivity)
+                                        .authenticate(
+                                            title = getString(com.rifsxd.ksunext.R.string.app_name),
+                                            subtitle = getString(com.rifsxd.ksunext.R.string.biometric_prompt_subtitle),
+                                            onSuccess = {
+                                                isPromptShowing = false
+                                                appLockState.value = false
+                                                com.rifsxd.ksunext.ui.util.AppLockManager.unlock()
+                                            },
+                                            onError = {
+                                                isPromptShowing = false
+                                                Toast.makeText(this@MainActivity, "Auth failed: $it", Toast.LENGTH_SHORT).show()
+                                                finish()
+                                            }
+                                        )
+                                }
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose {
+                            lifecycleOwner.lifecycle.removeObserver(observer)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -492,10 +571,46 @@ class MainActivity : ComponentActivity() {
         amoledModeState.value = enabled
     }
 
+    fun setNavBarEnabled(enabled: Boolean) {
+        try {
+            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+            prefs.edit().putBoolean("enable_navbar", enabled).apply()
+        } catch (_: Exception) {}
+        navBarEnabled.value = enabled
+    }
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        try {
+            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+            prefs.edit().putBoolean("enable_haptics", enabled).apply()
+        } catch (_: Exception) {}
+        hapticsEnabled.value = enabled
+    }
+
+    override fun onStart() {
+        super.onStart()
+        com.rifsxd.ksunext.ui.util.AppLockManager.onActivityStart()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
         setIntent(intent)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        com.rifsxd.ksunext.ui.util.AppLockManager.onActivityStop()
+        val prefsInit = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefsInit.getBoolean("enable_biometric_lock", false)) {
+            appLockState.value = true
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("appLockState", appLockState.value)
+
     }
 
     private fun handleIntent(intent: Intent) {

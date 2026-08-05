@@ -38,8 +38,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import androidx.fragment.app.FragmentActivity
+import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.fillMaxSize
+
 @SuppressLint("SetJavaScriptEnabled")
-class WebUIActivity : ComponentActivity() {
+class WebUIActivity : FragmentActivity() {
 
     private lateinit var webviewInterface: WebViewInterface
     private val rootShell by lazy { createRootShell(true) }
@@ -59,6 +63,11 @@ class WebUIActivity : ComponentActivity() {
 
     private var insetsContinuation: CancellableContinuation<Unit>? = null
     private var isInsetsEnabled = false
+
+
+    private var appLockState = false
+    private var isPromptShowing = false
+    private lateinit var lockOverlay: android.view.View
 
     fun erudaConsole(context: android.content.Context): String {
         return context.assets.open("eruda.min.js").bufferedReader().use { it.readText() }
@@ -140,6 +149,13 @@ class WebUIActivity : ComponentActivity() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         val developerOptionsEnabled = prefs.getBoolean("enable_developer_options", false)
         val enableWebDebugging = prefs.getBoolean("enable_web_debugging", false)
+
+        if (savedInstanceState != null) {
+            appLockState = savedInstanceState.getBoolean("appLockState", false)
+
+        } else {
+            appLockState = prefs.getBoolean("enable_biometric_lock", false)
+        }
 
         WebView.setWebContentsDebuggingEnabled(developerOptionsEnabled && enableWebDebugging)
 
@@ -306,6 +322,22 @@ class WebUIActivity : ComponentActivity() {
         setupWebUIBackHandler()
         
         container.addView(webView)
+
+        lockOverlay = androidx.compose.ui.platform.ComposeView(this).apply {
+            setContent {
+                val amoledMode = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("enable_amoled", false)
+                com.rifsxd.ksunext.ui.theme.KernelSUTheme(amoledMode = amoledMode) {
+                    androidx.compose.material3.Surface(
+                        modifier = Modifier.fillMaxSize()
+                    ) {}
+                }
+            }
+            visibility = if (appLockState) android.view.View.VISIBLE else android.view.View.GONE
+            isClickable = true
+            isFocusable = true
+        }
+        container.addView(lockOverlay)
+
         setContentView(container)
 
         // coroutine-safe inset wait
@@ -410,6 +442,63 @@ class WebUIActivity : ComponentActivity() {
                 ViewCompat.requestApplyInsets(container)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (appLockState) {
+            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+            val timeout = prefs.getLong("app_lock_timeout", 60000L)
+
+            if (!com.rifsxd.ksunext.ui.util.AppLockManager.shouldPrompt(timeout)) {
+                appLockState = false
+                lockOverlay.visibility = android.view.View.GONE
+                return
+            }
+
+            if (!isPromptShowing) {
+                isPromptShowing = true
+                lockOverlay.visibility = android.view.View.VISIBLE
+                com.rifsxd.ksunext.ui.util.BiometricAuthenticator(this)
+                    .authenticate(
+                        title = getString(com.rifsxd.ksunext.R.string.app_name),
+                        subtitle = getString(com.rifsxd.ksunext.R.string.biometric_prompt_subtitle),
+                        onSuccess = {
+                            isPromptShowing = false
+                            appLockState = false
+                            lockOverlay.visibility = android.view.View.GONE
+                            com.rifsxd.ksunext.ui.util.AppLockManager.unlock()
+                        },
+                        onError = {
+                            isPromptShowing = false
+                            Toast.makeText(this, "Auth failed: $it", Toast.LENGTH_SHORT).show()
+                            finish()
+                        }
+                    )
+            }
+        } else {
+            lockOverlay.visibility = android.view.View.GONE
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        com.rifsxd.ksunext.ui.util.AppLockManager.onActivityStart()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        com.rifsxd.ksunext.ui.util.AppLockManager.onActivityStop()
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefs.getBoolean("enable_biometric_lock", false)) {
+            appLockState = true
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("appLockState", appLockState)
+
     }
 
     override fun onDestroy() {
