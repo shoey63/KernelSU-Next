@@ -29,6 +29,10 @@ static struct file *ksu_preinit_file;
 
 void __init ksu_preinit_init(void)
 {
+#if !defined(CONFIG_KPROBES) || defined(CONFIG_KSU_SUSFS)
+    pr_info("preinit: unsupported under current hook provider\n");
+    return;
+#else
     size_t size = ksu_preinit_runner_end - ksu_preinit_runner_start;
     struct file *file;
     loff_t pos = 0;
@@ -54,6 +58,7 @@ void __init ksu_preinit_init(void)
 
     ksu_preinit_file = file;
     pr_info("preinit: runner staged (%zu bytes)\n", size);
+#endif
 }
 
 bool ksu_preinit_enabled_param(void)
@@ -76,6 +81,7 @@ void ksu_preinit_exit(void)
     ksu_preinit_release();
 }
 
+#if defined(CONFIG_KPROBES) && !defined(CONFIG_KSU_SUSFS)
 static bool is_selinux_setup(const char __user *const __user *argv_user)
 {
     static const char expected[] = "selinux_setup";
@@ -157,3 +163,10 @@ bool ksu_preinit_handle_execve(const char __user **filename_user, const char __u
     }
     return true;
 }
+#else
+bool ksu_preinit_handle_execve(const char __user **filename_user, const char __user *const __user *argv_user,
+                               int orig_nr, struct pt_regs *regs, long *ret)
+{
+    return false;
+}
+#endif
